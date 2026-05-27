@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
+  --color-brand-primary: #3b82f6; /* Clean Blue */
+  --color-brand-secondary: #10b981; /* Clean Emerald */
+}
+
+/* Custom scrollbar styling for clean look */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0b0f19;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+/* Base resets & tweaks */
+html, body {
+  font-family: var(--font-sans);
+  background-color: #0b0f19; /* Solid clean dark background (Groww style) */
+  color: #e2e8f0;
+  overflow-x: hidden;
+}
+
+/* Clean, flat, high-contrast panels instead of glassmorphism */
+.glass-panel {
+  background-color: #111827; /* Solid gray-900/slate-900 */
+  border: 1px solid #1f2937; /* Clean borders */
+}
+
+.glass-panel-hover:hover {
+  border-color: #3b82f640; /* Minimal focus blue */
+}
+
+.glass-input {
+  background-color: #0b0f19;
+  border: 1px solid #1f2937;
+}
+
+.glass-input:focus {
+  border-color: #3b82f6;
+  outline: none;
+}

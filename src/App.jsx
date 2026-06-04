@@ -15,7 +15,7 @@ import {
 } from 'react-icons/fi';
 
 // 🚀 YOUR LIVE BACKEND URL CONFIGURED HERE
-const API_URL = 'https://finpilot-dashboard.onrender.com';
+const API_URL = 'http://localhost:5000';
 
 export default function App() {
   const [user, setUser] = useState(JSON.parse(localStorage.getItem('finpilot_user')) || null);
@@ -24,6 +24,8 @@ export default function App() {
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authIncome, setAuthIncome] = useState('150000');
+  const [authError, setAuthError] = useState('');
+  const [authLoading, setAuthLoading] = useState(false);
 
   const [activeTab, setActiveTab] = useState('dashboard');
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -105,51 +107,55 @@ export default function App() {
     }
   }, [user]);
 
-  // 🛠️ SELF-CORRECTING AUTOMATIC AUTHENTICATION LOOP
+  // Authenticated login with auto-retry for sleeping Render backend
   const handleAuth = async (e) => {
     e.preventDefault();
+    setAuthError('');
+    setAuthLoading(true);
 
     const endpoint = isRegister ? 'register' : 'login';
     const payload = isRegister
       ? { username: authUsername, email: authEmail, password: authPassword, monthlyIncome: authIncome }
       : { email: authEmail, password: authPassword };
 
-    // Create a clean local fallback user profile immediately 
-    const fallbackUser = {
-      id: "user_" + Math.random().toString(36).substr(2, 9),
-      username: authUsername || authEmail.split('@')[0] || "User",
-      email: authEmail,
-      monthlyIncome: parseFloat(authIncome) || 150000
-    };
+    const MAX_RETRIES = 3;
+    let lastError = null;
 
-    try {
-      // 1. Attempt connection to your live Render backend
-      const res = await axios.post(`${API_URL}/api/auth/${endpoint}`, payload).catch(async (err) => {
-        // If /register returns a 404, quickly attempt /signup fallback route
-        if (isRegister && err.response?.status === 404) {
-          return await axios.post(`${API_URL}/api/auth/signup`, payload);
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const res = await axios.post(`${API_URL}/api/auth/${endpoint}`, payload, { timeout: 20000 });
+
+        if (res && res.data && res.data.user) {
+          const loggedInUser = res.data.user;
+          localStorage.setItem('finpilot_user', JSON.stringify(loggedInUser));
+          setUser(loggedInUser);
+          setAuthLoading(false);
+          return;
+        } else {
+          lastError = 'Server returned an unexpected response. Please try again.';
         }
-        throw err;
-      });
-
-      // 2. If the backend responds successfully, use the backend data structure
-      if (res && res.data) {
-        const loggedInUser = res.data.user || { ...fallbackUser, id: res.data.userId || fallbackUser.id };
-        localStorage.setItem('finpilot_user', JSON.stringify(loggedInUser));
-        setUser(loggedInUser);
-      } else {
-        // 3. If response is empty, do not crash—seamlessly drop into the local user profile
-        localStorage.setItem('finpilot_user', JSON.stringify(fallbackUser));
-        setUser(fallbackUser);
+      } catch (err) {
+        lastError = err;
+        // If it's a 400 (invalid credentials / user exists), don't retry
+        if (err.response && err.response.status === 400) {
+          setAuthError(err.response.data?.message || 'Invalid credentials. Please check your email and password.');
+          setAuthLoading(false);
+          return;
+        }
+        // If server is waking up, wait before retrying
+        if (attempt < MAX_RETRIES) {
+          await new Promise(resolve => setTimeout(resolve, 3000));
+        }
       }
-    } catch (err) {
-      console.warn("Backend auth failed, deploying instant frontend session fallback:", err.message);
-
-      // 4. CRITICAL AUTO-PASS: If MongoDB is sleeping, blocking Render's IP, or throwing errors, 
-      // this overrides the block instantly so the user is never stuck on an error screen.
-      localStorage.setItem('finpilot_user', JSON.stringify(fallbackUser));
-      setUser(fallbackUser);
     }
+
+    // All retries exhausted
+    setAuthError(
+      typeof lastError === 'string'
+        ? lastError
+        : 'Server is currently unavailable. Please wait a moment and try again.'
+    );
+    setAuthLoading(false);
   };
 
   const triggerLogoutConfirmation = () => {
@@ -169,32 +175,41 @@ export default function App() {
     setAnalyzing(true);
     setAnalysisError('');
     setAiAnalysis(null);
+
+    if (transactions.length === 0) {
+      setAnalysisError('Please log at least one expense before running AI analysis.');
+      setAnalyzing(false);
+      return;
+    }
+
     try {
+      // Send expense data in body so AI can analyze even if DB lookup fails
+      const expensePayload = transactions.map(t => ({
+        title: t.name,
+        amount: Math.abs(t.amount),
+        category: t.category,
+        date: t.date,
+        wallet: t.wallet
+      }));
+
       const config = { headers: { 'user-id': user.id } };
-      const res = await axios.post(`${API_URL}/api/ai/analyze-spending`, {}, config);
+      const res = await axios.post(`${API_URL}/api/ai/analyze-spending`, {
+        expenses: expensePayload,
+        monthlyIncome: user.monthlyIncome || 150000
+      }, config);
 
       if (res.data && typeof res.data === 'object' && res.data.wastedMoney) {
         setAiAnalysis(res.data);
       } else {
-        // Fallback if the server sends plain text or a different format
         const textResponse = typeof res.data === 'string' ? res.data : JSON.stringify(res.data);
-        setAiAnalysis({
-          wastedMoney: textResponse || "Analysis compiled, structural verification pending.",
-          savingSuggestions: "Review your active category buckets to optimize recurring outflows.",
-          unusualExpenses: "No significant multi-fold deviations detected in this active window cycle.",
-          monthlyHabits: "Data matrix processing complete. Balance metrics sustained smoothly."
-        });
+        setAnalysisError(textResponse || 'AI returned an unexpected response format. Please try again.');
       }
     } catch (error) {
-      console.warn("AI Backend failed, deploying predictive safety model:", error.message);
-
-      // Auto-generate a beautiful client-side fallback analysis so it NEVER breaks for users
-      setAiAnalysis({
-        wastedMoney: `Based on your current logged baseline, you are maintaining stable parameters. Watch out for miscellaneous ${transactions[0]?.category || 'dining'} expenses.`,
-        savingSuggestions: "Consider allocating 10% of your remaining balance pool directly into high-yield buffers.",
-        unusualExpenses: "Single-point spikes are well balanced against your total allocation benchmark framework.",
-        monthlyHabits: "Consistent distribution noted across active funding channels (Cash/UPI/Cards)."
-      });
+      console.warn('AI analysis request failed:', error.message);
+      setAnalysisError(
+        error.response?.data?.message
+        || 'AI analysis is temporarily unavailable. Please try again in a moment.'
+      );
     }
     setAnalyzing(false);
   };
@@ -253,39 +268,49 @@ export default function App() {
     } catch (err) { alert("Failed to save adjustments."); }
   };
 
-  const handleAddExpense = (e) => {
+  const handleAddExpense = async (e) => {
     e.preventDefault();
-    const newTxId = "tx_" + Math.random().toString(36).substr(2, 9);
 
-    const localTx = {
-      id: newTxId,
-      name: expenseTitle.trim(),
-      date: new Date(expenseDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      rawDate: new Date(expenseDate),
-      category: expenseCategory,
-      amount: -Math.abs(parseFloat(expenseAmount)),
-      wallet: expenseWallet,
-      isCredit: false,
-      status: 'completed'
-    };
+    try {
+      // Save to backend first to get a real MongoDB _id
+      const res = await axios.post(`${API_URL}/api/expenses/add`, {
+        title: expenseTitle.trim(),
+        amount: parseFloat(expenseAmount),
+        category: expenseCategory,
+        date: expenseDate,
+        wallet: expenseWallet
+      }, { headers: { 'user-id': user.id } });
 
-    // 🚀 Background Sync: Run silently behind the scenes
-    axios.post(`${API_URL}/api/expenses/add`, {
-      title: expenseTitle.trim(),
-      amount: parseFloat(expenseAmount),
-      category: expenseCategory,
-      date: expenseDate,
-      wallet: expenseWallet
-    }, { headers: { 'user-id': user.id } }).catch(() => {
-      console.log("Sync queued locally.");
-    });
+      const savedExpense = res.data.expense;
+      const localTx = {
+        id: savedExpense._id,
+        name: savedExpense.title,
+        date: new Date(savedExpense.date).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        rawDate: new Date(savedExpense.date),
+        category: savedExpense.category,
+        amount: -Math.abs(savedExpense.amount),
+        wallet: savedExpense.wallet || 'Cash',
+        isCredit: false,
+        status: 'completed'
+      };
 
-    // 🚀 Instant UI Update: No alerts, no popups, total pass
-    setTransactions(prev => {
-      const updated = [localTx, ...prev];
-      localStorage.setItem(`finpilot_tx_${user.id}`, JSON.stringify(updated));
-      return updated;
-    });
+      setTransactions(prev => [localTx, ...prev]);
+    } catch (err) {
+      console.warn('Failed to save expense to server:', err.message);
+      // Still add locally so the UI is responsive, but use a temp ID
+      const localTx = {
+        id: 'tx_' + Math.random().toString(36).substr(2, 9),
+        name: expenseTitle.trim(),
+        date: new Date(expenseDate).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
+        rawDate: new Date(expenseDate),
+        category: expenseCategory,
+        amount: -Math.abs(parseFloat(expenseAmount)),
+        wallet: expenseWallet,
+        isCredit: false,
+        status: 'completed'
+      };
+      setTransactions(prev => [localTx, ...prev]);
+    }
 
     setExpenseTitle('');
     setExpenseAmount('');
@@ -532,32 +557,47 @@ export default function App() {
 
         <div className="bg-[#111827] border-2 border-slate-800 rounded-2xl p-8 w-full max-w-md shadow-2xl animate-[fadeIn_0.2s_ease-out]">
           <h2 className="text-xl font-black text-white mb-6 text-center">{isRegister ? 'Create Your Account' : 'Sign In to Your Workspace'}</h2>
+
+          {authError && (
+            <div className="p-4 mb-4 bg-red-500/10 border-2 border-red-500/30 text-red-400 rounded-xl text-sm font-bold flex items-center gap-2">
+              <FiAlertTriangle className="w-4 h-4 shrink-0" />
+              <span>{authError}</span>
+            </div>
+          )}
+
           <form onSubmit={handleAuth} className="space-y-5">
             {isRegister && (
               <div>
                 <label className="block text-xs font-black text-slate-400 uppercase mb-1 tracking-wider">Full Username</label>
-                <input type="text" required value={authUsername} onChange={e => setAuthUsername(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-bold" />
+                <input type="text" required value={authUsername} onChange={e => setAuthUsername(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-bold" disabled={authLoading} />
               </div>
             )}
             <div>
               <label className="block text-xs font-black text-slate-400 uppercase mb-1 tracking-wider">Email Address</label>
-              <input type="email" required value={authEmail} onChange={e => setAuthEmail(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-bold" />
+              <input type="email" required value={authEmail} onChange={e => setAuthEmail(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-bold" disabled={authLoading} />
             </div>
             <div>
               <label className="block text-xs font-black text-slate-400 uppercase mb-1 tracking-wider">Password</label>
-              <input type="password" required value={authPassword} onChange={e => setAuthPassword(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-bold" />
+              <input type="password" required value={authPassword} onChange={e => setAuthPassword(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-bold" disabled={authLoading} />
             </div>
             {isRegister && (
               <div>
                 <label className="block text-xs font-black text-slate-400 uppercase mb-1 tracking-wider">Monthly Income Benchmark (₹)</label>
-                <input type="number" required value={authIncome} onChange={e => setAuthIncome(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-black" />
+                <input type="number" required value={authIncome} onChange={e => setAuthIncome(e.target.value)} className="w-full h-12 px-4 text-sm bg-slate-950 border-2 border-slate-800 rounded-xl text-slate-200 focus:outline-none focus:border-blue-500 font-black" disabled={authLoading} />
               </div>
             )}
-            <button type="submit" className="w-full h-12 rounded-xl bg-blue-600 border-0 text-sm font-black text-white mt-4 cursor-pointer hover:bg-blue-500 transition-colors shadow-lg">
-              {isRegister ? 'Register Account' : 'Secure Session Access'}
+            <button type="submit" disabled={authLoading} className={`w-full h-12 rounded-xl border-0 text-sm font-black text-white mt-4 cursor-pointer transition-colors shadow-lg flex items-center justify-center gap-2 ${authLoading ? 'bg-blue-800 cursor-wait' : 'bg-blue-600 hover:bg-blue-500'}`}>
+              {authLoading ? (
+                <>
+                  <svg className="animate-spin h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>
+                  <span>Connecting to server...</span>
+                </>
+              ) : (
+                <span>{isRegister ? 'Register Account' : 'Secure Session Access'}</span>
+              )}
             </button>
           </form>
-          <p className="text-xs text-slate-400 mt-6 text-center cursor-pointer hover:text-white font-bold transition-colors" onClick={() => setIsRegister(!isRegister)}>
+          <p className="text-xs text-slate-400 mt-6 text-center cursor-pointer hover:text-white font-bold transition-colors" onClick={() => { setIsRegister(!isRegister); setAuthError(''); }}>
             {isRegister ? 'Already have an account? Sign In' : "Don't have an account? Create one"}
           </p>
         </div>
